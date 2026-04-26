@@ -1,0 +1,11 @@
+# https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: sslpinning-api
+    runtime: docker
+    plan: free
+    region: oregon
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
