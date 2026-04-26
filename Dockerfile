@@ -1,15 +1,18 @@
-# Build: docker build -t sslpinning-api .
-# Run:  docker run -p 8080:8080 -e PORT=8080 sslpinning-api
-FROM eclipse-temurin:17-jdk-alpine AS build
+# Spring Boot leaves both the runnable fat JAR and *.jar.original in target/.
+# Do not use COPY ... *.jar app.jar — multiple matches make the build fail.
+FROM maven:3.9.9-eclipse-temurin-17 AS build
 WORKDIR /app
 COPY pom.xml .
 COPY src ./src
-RUN apk add --no-cache maven && mvn -q -DskipTests package
+ENV MAVEN_OPTS="-Xmx512m"
+RUN mvn -B -DskipTests package \
+    && JAR=$(ls target/*-SNAPSHOT.jar 2>/dev/null | grep -v '\.jar\.original$' | head -1) \
+    && cp "$JAR" /app/application.jar
 
-FROM eclipse-temurin:17-jre-alpine
+FROM eclipse-temurin:17-jre-jammy
 WORKDIR /app
-RUN addgroup -S app && adduser -S app -G app
-COPY --from=build /app/target/*.jar app.jar
+RUN groupadd --system app && useradd --system --gid app app
+COPY --from=build /app/application.jar app.jar
 USER app
 ENV PORT=8080
 EXPOSE 8080
