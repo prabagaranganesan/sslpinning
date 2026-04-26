@@ -1,0 +1,15 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# 1. Push this repo to GitHub/GitLab (free web services require a public repo, or use a paid workspace).
+# 2. Dashboard → New → Blueprint → connect repo → apply.
+# 3. After deploy, set the iOS app base URL to your HTTPS service URL, e.g. https://sslpinning-api.onrender.com
+
+services:
+  - type: web
+    name: sslpinning-api
+    runtime: docker
+    plan: free
+    region: oregon
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
