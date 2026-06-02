@@ -1,0 +1,540 @@
+name: ProxyHawk Guard Deploy Checkpoint
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Deployment environment (for mapping; e.g. dev/staging/prod)"
+        required: true
+        type: string
+      commit_sha:
+        description: "Commit SHA to evaluate and map to PR"
+        required: false
+        type: string
+      service_name:
+        description: "Optional service key for monorepo mapping"
+        required: false
+        type: string
+      fail_on_guard_issues:
+        description: "If true, fail this checkpoint when Guard latest run is failing"
+        required: false
+        type: boolean
+        default: false
+      run_mode:
+        description: "headless = run Guard in CI; latest = use existing run; mac_push = trigger Mac app"
+        required: false
+        type: string
+        default: "headless"
+      guard_base_url:
+        description: "Optional deploy host override — only rewrites endpoints captured on this host; other hosts (auth, microservices) stay as recorded. Leave empty to use session URLs as-is."
+        required: false
+        type: string
+      mapping_owner:
+        description: "Override repo owner for mapping lookup (default: current GitHub repo owner)"
+        required: false
+        type: string
+      mapping_repo:
+        description: "Override repo name for mapping lookup (default: current GitHub repo name)"
+        required: false
+        type: string
+      guard_runner_repository:
+        description: "owner/repo with tools/guard-runner when not vendored here (e.g. your-org/proxy_buddy)"
+        required: false
+        type: string
+      guard_runner_ref:
+        description: "Git ref to fetch guard-runner from"
+        required: false
+        type: string
+        default: "main"
+    secrets:
+      PROXYHAWK_API_BASE_URL:
+        required: false
+      PROXYHAWK_API_EMAIL:
+        required: false
+      PROXYHAWK_API_PASSWORD:
+        required: false
+      PROXYHAWK_API_TOKEN:
+        required: false
+      PROXYHAWK_MACHINE_ID:
+        required: false
+      PROXYHAWK_GUARD_RUNNER_REPO:
+        required: false
+      PROXYHAWK_GUARD_RUNNER_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Deployment environment (default dev)"
+        required: true
+        default: "dev"
+      commit_sha:
+        description: "Commit SHA to evaluate and map to PR (optional)"
+        required: false
+      service_name:
+        description: "Monorepo service mapping key (optional)"
+        required: false
+      fail_on_guard_issues:
+        description: "Fail checkpoint if Guard run reports broken/errors"
+        required: false
+        default: false
+        type: boolean
+      run_mode:
+        description: "latest or mac_push"
+        required: false
+        default: "latest"
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  proxyhawk-guard-checkpoint:
+    name: ProxyHawk Guard checkpoint
+    runs-on: ubuntu-latest
+    env:
+      PROXYHAWK_API_BASE_URL: ${{ vars.PROXYHAWK_API_BASE_URL || secrets.PROXYHAWK_API_BASE_URL || 'https://api.proxyhawk.io' }}
+      PROXYHAWK_OIDC_AUDIENCE: ${{ vars.PROXYHAWK_OIDC_AUDIENCE || 'https://api.proxyhawk.io' }}
+    outputs:
+      guard_outcome: ${{ steps.outcome.outputs.guard_outcome }}
+      guard_session_id: ${{ steps.mapping.outputs.guard_session_id }}
+      target_base_url: ${{ steps.mapping.outputs.target_base_url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve checkpoint context
+        id: ctx
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> "$GITHUB_OUTPUT"
+            echo "sha=${{ github.event.inputs.commit_sha || github.sha }}" >> "$GITHUB_OUTPUT"
+            echo "service_name=${{ github.event.inputs.service_name }}" >> "$GITHUB_OUTPUT"
+            echo "fail_on_guard_issues=${{ github.event.inputs.fail_on_guard_issues }}" >> "$GITHUB_OUTPUT"
+            echo "run_mode=${{ github.event.inputs.run_mode || 'headless' }}" >> "$GITHUB_OUTPUT"
+            echo "mapping_owner=${{ github.event.inputs.mapping_owner }}" >> "$GITHUB_OUTPUT"
+            echo "mapping_repo=${{ github.event.inputs.mapping_repo }}" >> "$GITHUB_OUTPUT"
+            echo "guard_base_url=${{ github.event.inputs.guard_base_url }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "environment=${{ inputs.environment }}" >> "$GITHUB_OUTPUT"
+            echo "sha=${{ inputs.commit_sha || github.sha }}" >> "$GITHUB_OUTPUT"
+            echo "service_name=${{ inputs.service_name }}" >> "$GITHUB_OUTPUT"
+            echo "fail_on_guard_issues=${{ inputs.fail_on_guard_issues }}" >> "$GITHUB_OUTPUT"
+            echo "run_mode=${{ inputs.run_mode || 'headless' }}" >> "$GITHUB_OUTPUT"
+            echo "mapping_owner=${{ inputs.mapping_owner }}" >> "$GITHUB_OUTPUT"
+            echo "mapping_repo=${{ inputs.mapping_repo }}" >> "$GITHUB_OUTPUT"
+            echo "guard_base_url=${{ inputs.guard_base_url }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve PR from commit SHA
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sha = `${{ steps.ctx.outputs.sha }}`.trim();
+            if (!sha) {
+              core.setOutput('pr_number', '');
+              return;
+            }
+            const { data } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: sha
+            });
+            const open = data.find(pr => pr.state === 'open');
+            core.setOutput('pr_number', open ? String(open.number) : '');
+
+      - name: Obtain ProxyHawk API auth (GitHub OIDC)
+        id: auth
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const audience = process.env.PROXYHAWK_OIDC_AUDIENCE || 'https://api.proxyhawk.io';
+            let token = '';
+            try {
+              token = await core.getIDToken(audience);
+              core.info(`Using GitHub Actions OIDC for ProxyHawk (audience=${audience}).`);
+            } catch (err) {
+              core.warning(`GitHub OIDC unavailable: ${err.message}`);
+            }
+            core.setOutput('token', token);
+
+      - name: Resolve ProxyHawk API auth (legacy fallback)
+        run: |
+          token="${{ steps.auth.outputs.token }}"
+          if [ -n "$token" ]; then
+            echo "PROXYHAWK_API_TOKEN=$token" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          echo "GitHub OIDC token unavailable — trying legacy ProxyHAWK secrets (manual/local only)."
+          login_error=""
+          if [ -n "${{ secrets.PROXYHAWK_API_EMAIL || vars.PROXYHAWK_API_EMAIL }}" ] && [ -n "${{ secrets.PROXYHAWK_API_PASSWORD || vars.PROXYHAWK_API_PASSWORD }}" ]; then
+            body=$(curl -sS \
+              -H "Content-Type: application/json" \
+              -H "ngrok-skip-browser-warning: true" \
+              -d "{\"email\":\"${{ secrets.PROXYHAWK_API_EMAIL || vars.PROXYHAWK_API_EMAIL }}\",\"password\":\"${{ secrets.PROXYHAWK_API_PASSWORD || vars.PROXYHAWK_API_PASSWORD }}\"}" \
+              "${PROXYHAWK_API_BASE_URL%/}/api/v1/auth/login")
+            token=$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('accessToken',''))" 2>/dev/null || true)
+            login_error="$body"
+          fi
+          if [ -z "$token" ] && [ -n "${{ secrets.PROXYHAWK_API_TOKEN || vars.PROXYHAWK_API_TOKEN }}" ]; then
+            token="${{ secrets.PROXYHAWK_API_TOKEN || vars.PROXYHAWK_API_TOKEN }}"
+          fi
+          if [ -z "$token" ]; then
+            echo "Could not authenticate to ProxyHawk."
+            echo "For team CI: admin saves deploy checkpoint in ProxyHawk — no user secrets needed (GitHub OIDC)."
+            echo "For local/manual runs: set PROXYHAWK_API_TOKEN or email/password secrets."
+            [ -n "$login_error" ] && echo "Login failed: $login_error"
+            exit 1
+          fi
+          echo "::add-mask::$token"
+          echo "PROXYHAWK_API_TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: Resolve Guard mapping from backend
+        id: mapping
+        run: |
+          owner="${{ steps.ctx.outputs.mapping_owner }}"
+          repo="${{ steps.ctx.outputs.mapping_repo }}"
+          if [ -z "$owner" ]; then owner="${GITHUB_REPOSITORY%%/*}"; fi
+          if [ -z "$repo" ]; then repo="${GITHUB_REPOSITORY#*/}"; fi
+          env_name="${{ steps.ctx.outputs.environment }}"
+          service_name="${{ steps.ctx.outputs.service_name }}"
+          echo "Resolving mapping for owner=${owner} repo=${repo} environment=${env_name}"
+
+          url="${PROXYHAWK_API_BASE_URL%/}/api/v1/integrations/github/pipeline/resolve-mapping"
+          code=$(curl -sS -o mapping.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${PROXYHAWK_API_TOKEN}" \
+            -H "ngrok-skip-browser-warning: true" \
+            --get "$url" \
+            --data-urlencode "owner=${owner}" \
+            --data-urlencode "repo=${repo}" \
+            --data-urlencode "environment=${env_name}" \
+            --data-urlencode "service=${service_name}")
+
+          if [ "$code" != "200" ]; then
+            echo "Mapping resolve failed (HTTP $code)"
+            cat mapping.json || true
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json
+          with open("mapping.json", "r", encoding="utf-8") as f:
+              payload = json.load(f)
+          matched = bool(payload.get("matched"))
+          mapping = payload.get("mapping") or {}
+          with open(".mapping.out", "w", encoding="utf-8") as out:
+              out.write(f"matched={'true' if matched else 'false'}\n")
+              out.write(f"guard_session_id={mapping.get('guardSessionId','')}\n")
+              out.write(f"target_base_url={mapping.get('targetBaseUrl','')}\n")
+          PY
+          cat .mapping.out >> "$GITHUB_OUTPUT"
+
+      - name: Fail when no active mapping (checkpoint required)
+        if: steps.mapping.outputs.matched != 'true'
+        run: |
+          echo "ProxyHawk Guard checkpoint failed: no active mapping for repo/environment."
+          exit 1
+
+      - name: Notify backend deployment event
+        if: steps.mapping.outputs.matched == 'true'
+        env:
+          PROXYHAWK_API_BASE_URL: ${{ secrets.PROXYHAWK_API_BASE_URL || vars.PROXYHAWK_API_BASE_URL }}
+        run: |
+          payload=$(cat <<EOF
+          {
+            "provider":"github",
+            "repoOwner":"${GITHUB_REPOSITORY%%/*}",
+            "repoName":"${GITHUB_REPOSITORY#*/}",
+            "environment":"${{ steps.ctx.outputs.environment }}",
+            "serviceName":"${{ steps.ctx.outputs.service_name }}",
+            "branchName":"${{ github.ref_name }}",
+            "deploymentStatus":"success",
+            "commitSha":"${{ steps.ctx.outputs.sha }}",
+            "pullRequestNumber":${{ steps.pr.outputs.pr_number || 'null' }},
+            "deployedUrl":"${{ steps.mapping.outputs.target_base_url }}"
+          }
+          EOF
+          )
+          curl -sS -o deploy_event.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${PROXYHAWK_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -H "ngrok-skip-browser-warning: true" \
+            -d "$payload" \
+            "${PROXYHAWK_API_BASE_URL%/}/api/v1/integrations/github/pipeline/deployments" > deploy_http_code.txt
+
+      - name: Install Rust toolchain
+        if: steps.mapping.outputs.matched == 'true' && steps.ctx.outputs.run_mode == 'headless'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Ensure guard-runner source
+        if: steps.mapping.outputs.matched == 'true' && steps.ctx.outputs.run_mode == 'headless'
+        env:
+          RUNNER_REPO: ${{ inputs.guard_runner_repository || secrets.PROXYHAWK_GUARD_RUNNER_REPO }}
+          RUNNER_REF: ${{ inputs.guard_runner_ref || 'main' }}
+          RUNNER_TOKEN: ${{ secrets.PROXYHAWK_GUARD_RUNNER_TOKEN || github.token }}
+        run: |
+          if [ -f tools/guard-runner/Cargo.toml ]; then
+            echo "Using vendored tools/guard-runner"
+            exit 0
+          fi
+          if [ -z "$RUNNER_REPO" ]; then
+            echo "Missing tools/guard-runner in this repository."
+            echo "Fix one of:"
+            echo "  1. Commit tools/guard-runner/ into this repo, or"
+            echo "  2. Set workflow input guard_runner_repository, or"
+            echo "  3. Add secret PROXYHAWK_GUARD_RUNNER_REPO (owner/repo with tools/guard-runner)"
+            exit 1
+          fi
+          echo "Fetching tools/guard-runner from ${RUNNER_REPO}@${RUNNER_REF}"
+          git clone --depth 1 --branch "$RUNNER_REF" --filter=blob:none --sparse \
+            "https://x-access-token:${RUNNER_TOKEN}@github.com/${RUNNER_REPO}.git" /tmp/guard-runner-src
+          cd /tmp/guard-runner-src
+          git sparse-checkout set tools/guard-runner
+          mkdir -p "$GITHUB_WORKSPACE/tools"
+          cp -r tools/guard-runner "$GITHUB_WORKSPACE/tools/guard-runner"
+
+      - name: Run Guard headless against deployed API
+        if: steps.mapping.outputs.matched == 'true' && steps.ctx.outputs.run_mode == 'headless'
+        env:
+          PROXYHAWK_API_BASE_URL: ${{ secrets.PROXYHAWK_API_BASE_URL || vars.PROXYHAWK_API_BASE_URL }}
+          PROXYHAWK_API_EMAIL: ${{ secrets.PROXYHAWK_API_EMAIL || vars.PROXYHAWK_API_EMAIL }}
+          PROXYHAWK_API_PASSWORD: ${{ secrets.PROXYHAWK_API_PASSWORD || vars.PROXYHAWK_API_PASSWORD }}
+          PROXYHAWK_GUARD_SESSION_ID: ${{ steps.mapping.outputs.guard_session_id }}
+          GUARD_BASE_URL: ${{ steps.ctx.outputs.guard_base_url || steps.mapping.outputs.target_base_url || vars.GUARD_BASE_URL || secrets.GUARD_BASE_URL }}
+          GUARD_AUTH_TOKEN: ${{ secrets.GUARD_AUTH_TOKEN }}
+          GUARD_AUTH_USERNAME: ${{ secrets.GUARD_AUTH_USERNAME }}
+          GUARD_AUTH_PASSWORD: ${{ secrets.GUARD_AUTH_PASSWORD }}
+          GUARD_PRINT_RESPONSES: all
+        run: |
+          if [ -z "$GUARD_BASE_URL" ]; then
+            echo "No deploy host override — replaying endpoints on their recorded hosts (multi-host session)."
+          else
+            echo "Deploy host override: $GUARD_BASE_URL (only matching-host endpoints are rewritten)."
+          fi
+          cd tools/guard-runner
+          cargo build --release
+          set +e
+          if [ -n "$GUARD_BASE_URL" ]; then
+            ./target/release/proxyhawk-guard \
+              --session-id "$PROXYHAWK_GUARD_SESSION_ID" \
+              --base-url "$GUARD_BASE_URL" \
+              --submit
+          else
+            ./target/release/proxyhawk-guard \
+              --session-id "$PROXYHAWK_GUARD_SESSION_ID" \
+              --submit
+          fi
+          runner_exit=$?
+          set -e
+          echo "Headless runner exit code: ${runner_exit}"
+          if [ "$runner_exit" -ne 0 ]; then
+            echo "Continuing checkpoint flow in report-only friendly mode; final block step controls enforcement."
+          fi
+
+      - name: Trigger Guard run on Mac via silent push
+        if: steps.mapping.outputs.matched == 'true' && steps.ctx.outputs.run_mode == 'mac_push'
+        id: mac_push
+        env:
+          PROXYHAWK_API_BASE_URL: ${{ secrets.PROXYHAWK_API_BASE_URL || vars.PROXYHAWK_API_BASE_URL }}
+          PROXYHAWK_MACHINE_ID: ${{ secrets.PROXYHAWK_MACHINE_ID || vars.PROXYHAWK_MACHINE_ID }}
+        run: |
+          if [ -z "$PROXYHAWK_MACHINE_ID" ]; then
+            echo "mac_push mode requires PROXYHAWK_MACHINE_ID secret (see ~/Library/Application Support/ProxyHawk/guard/machine_id.txt)"
+            exit 1
+          fi
+
+          sid="${{ steps.mapping.outputs.guard_session_id }}"
+          latest_url="${PROXYHAWK_API_BASE_URL%/}/api/v1/guard/sessions/${sid}/runs/latest"
+          baseline_code=$(curl -sS -o baseline_run.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${PROXYHAWK_API_TOKEN}" \
+            -H "ngrok-skip-browser-warning: true" \
+            "$latest_url" || true)
+          echo "baseline_http_code=$baseline_code" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import json, os
+          baseline = ""
+          if os.path.exists("baseline_run.json"):
+              try:
+                  with open("baseline_run.json", "r", encoding="utf-8") as f:
+                      payload = json.load(f)
+                  baseline = payload.get("runAt") or ""
+              except Exception:
+                  baseline = ""
+          with open(".baseline_run_at", "w", encoding="utf-8") as out:
+              out.write(baseline)
+          PY
+
+          payload=$(cat <<EOF
+          {"machineId":"${PROXYHAWK_MACHINE_ID}","sessionId":"${sid}"}
+          EOF
+          )
+          push_code=$(curl -sS -o push_result.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${PROXYHAWK_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -H "ngrok-skip-browser-warning: true" \
+            -d "$payload" \
+            "${PROXYHAWK_API_BASE_URL%/}/api/v1/guard/push/test-fire")
+          echo "push_http_code=$push_code" >> "$GITHUB_OUTPUT"
+          cat push_result.json
+          if [ "$push_code" != "200" ]; then
+            echo "Silent push trigger failed (HTTP $push_code)"
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, sys
+          with open("push_result.json", "r", encoding="utf-8") as f:
+              payload = json.load(f)
+          if not payload.get("accepted"):
+              print(payload.get("message", "APNs push was not accepted"))
+              sys.exit(1)
+          PY
+
+      - name: Wait for fresh Guard run after Mac push
+        if: steps.mapping.outputs.matched == 'true' && steps.ctx.outputs.run_mode == 'mac_push'
+        env:
+          PROXYHAWK_API_BASE_URL: ${{ secrets.PROXYHAWK_API_BASE_URL || vars.PROXYHAWK_API_BASE_URL }}
+        run: |
+          sid="${{ steps.mapping.outputs.guard_session_id }}"
+          url="${PROXYHAWK_API_BASE_URL%/}/api/v1/guard/sessions/${sid}/runs/latest"
+          baseline=$(cat .baseline_run_at 2>/dev/null || true)
+          export BASELINE="$baseline"
+          echo "Polling for run newer than: ${baseline:-<none>}"
+          for attempt in $(seq 1 20); do
+            sleep 15
+            code=$(curl -sS -o guard_poll.json -w "%{http_code}" \
+              -H "Authorization: Bearer ${PROXYHAWK_API_TOKEN}" \
+              -H "ngrok-skip-browser-warning: true" \
+              "$url")
+            if [ "$code" != "200" ]; then
+              echo "Attempt ${attempt}/20: no run yet (HTTP $code)"
+              continue
+            fi
+            if python3 - <<'PY'
+          import json, os, sys
+          baseline = (os.environ.get("BASELINE") or "").strip()
+          with open("guard_poll.json", "r", encoding="utf-8") as f:
+              payload = json.load(f)
+          run_at = (payload.get("runAt") or "").strip()
+          if not run_at:
+              sys.exit(1)
+          if not baseline or run_at > baseline:
+              print(f"Fresh run detected at {run_at}")
+              sys.exit(0)
+          sys.exit(1)
+          PY
+            then
+              echo "Fresh Guard run detected"
+              exit 0
+            fi
+            echo "Attempt ${attempt}/20: latest run unchanged"
+          done
+          echo "Timed out waiting for Mac Guard run. Keep ProxyHawk running/backgrounded and retry."
+          exit 1
+
+      - name: Fetch latest Guard run
+        if: steps.mapping.outputs.matched == 'true'
+        id: latest
+        env:
+          PROXYHAWK_API_BASE_URL: ${{ secrets.PROXYHAWK_API_BASE_URL || vars.PROXYHAWK_API_BASE_URL }}
+        run: |
+          sid="${{ steps.mapping.outputs.guard_session_id }}"
+          url="${PROXYHAWK_API_BASE_URL%/}/api/v1/guard/sessions/${sid}/runs/latest"
+          code=$(curl -sS -o guard_latest_run.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${PROXYHAWK_API_TOKEN}" \
+            -H "ngrok-skip-browser-warning: true" \
+            "$url")
+          echo "http_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Build PR comment
+        if: steps.latest.outputs.http_code == '200'
+        run: |
+          python3 - <<'PY'
+          import json
+          marker = "<!-- proxyhawk-guard-deploy-check -->"
+          with open("guard_latest_run.json", "r", encoding="utf-8") as f:
+              payload = json.load(f)
+          broken = int(payload.get("brokenCount", 0))
+          errors = int(payload.get("errorCount", 0))
+          status = "Passing" if (broken + errors) == 0 else "Failing"
+          body = f"""{marker}
+          ## ProxyHawk Guard (Deployment Checkpoint)
+
+          **{status}** for `{payload.get("sessionName","Guard Session")}`
+          - Run at: `{payload.get("runAt","unknown")}`
+          - Total: `{payload.get("totalCount",0)}` | OK: `{payload.get("okCount",0)}` | Broken: `{broken}` | Errors: `{errors}`
+          """
+          with open("guard_pr_comment.md", "w", encoding="utf-8") as out:
+              out.write(body)
+          PY
+
+      - name: Fail when Guard latest run is unavailable
+        if: steps.latest.outputs.http_code != '200'
+        run: |
+          echo "ProxyHawk Guard checkpoint failed: latest run not available (HTTP ${{ steps.latest.outputs.http_code }})."
+          echo "Ensure the headless Guard runner submits run results before this checkpoint evaluates."
+          exit 1
+
+      - name: Upsert PR comment
+        if: steps.latest.outputs.http_code == '200' && steps.pr.outputs.pr_number != ''
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.pr_number }}
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('guard_pr_comment.md', 'utf8');
+            const marker = '<!-- proxyhawk-guard-deploy-check -->';
+            const issue_number = Number(process.env.PR_NUMBER);
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number,
+              per_page: 100
+            });
+            const existing = comments.find(c =>
+              c.user?.type === 'Bot' && typeof c.body === 'string' && c.body.includes(marker)
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number,
+                body
+              });
+            }
+
+      - name: Evaluate checkpoint outcome
+        if: steps.latest.outputs.http_code == '200'
+        id: outcome
+        run: |
+          python3 - <<'PY'
+          import json
+          with open("guard_latest_run.json", "r", encoding="utf-8") as f:
+              payload = json.load(f)
+          broken = int(payload.get("brokenCount", 0))
+          errors = int(payload.get("errorCount", 0))
+          outcome = "failing" if (broken + errors) > 0 else "passing"
+          with open(".outcome", "w", encoding="utf-8") as out:
+              out.write(f"guard_outcome={outcome}\n")
+          PY
+          cat .outcome >> "$GITHUB_OUTPUT"
+
+      - name: Block deployment when Guard fails
+        if: steps.latest.outputs.http_code == '200'
+        run: |
+          enforce="${{ steps.ctx.outputs.fail_on_guard_issues }}"
+          outcome="${{ steps.outcome.outputs.guard_outcome }}"
+          if [ "$enforce" = "true" ] && [ "$outcome" = "failing" ]; then
+            echo "ProxyHawk Guard checkpoint failed; block deployment."
+            exit 1
+          fi
+          echo "ProxyHawk Guard checkpoint passed (or fail_on_guard_issues=false)."

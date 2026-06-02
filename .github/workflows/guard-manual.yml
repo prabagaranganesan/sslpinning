@@ -1,0 +1,27 @@
+name: Guard checkpoint (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        required: true
+        default: "dev"
+      fail_on_guard_issues:
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  guard-checkpoint:
+    uses: ./.github/workflows/guard-deploy-pr-check.yml
+    with:
+      environment: ${{ inputs.environment }}
+      commit_sha: ${{ github.sha }}
+      run_mode: headless
+      fail_on_guard_issues: ${{ inputs.fail_on_guard_issues }}
+      guard_runner_repository: prabagaranganesan/ProxyBuddyApp
+    secrets: inherit
