@@ -144,48 +144,63 @@ jobs:
             const open = data.find(pr => pr.state === 'open');
             core.setOutput('pr_number', open ? String(open.number) : '');
 
-      - name: Obtain ProxyHawk API auth (GitHub OIDC)
-        id: auth
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const audience = process.env.PROXYHAWK_OIDC_AUDIENCE || 'https://api.proxyhawk.io';
-            let token = '';
-            try {
-              token = await core.getIDToken(audience);
-              core.info(`Using GitHub Actions OIDC for ProxyHawk (audience=${audience}).`);
-            } catch (err) {
-              core.warning(`GitHub OIDC unavailable: ${err.message}`);
-            }
-            core.setOutput('token', token);
+      # - name: Obtain ProxyHawk API auth (GitHub OIDC)
+      #   id: auth
+      #   uses: actions/github-script@v7
+      #   with:
+      #     script: |
+      #       const audience = process.env.PROXYHAWK_OIDC_AUDIENCE || 'https://api.proxyhawk.io';
+      #       let token = '';
+      #       try {
+      #         token = await core.getIDToken(audience);
+      #         core.info(`Using GitHub Actions OIDC for ProxyHawk (audience=${audience}).`);
+      #       } catch (err) {
+      #         core.warning(`GitHub OIDC unavailable: ${err.message}`);
+      #       }
+      #       core.setOutput('token', token);
 
-      - name: Resolve ProxyHawk API auth (legacy fallback)
+      # - name: Resolve ProxyHawk API auth (legacy fallback)
+      #   run: |
+      #     token="${{ steps.auth.outputs.token }}"
+      #     if [ -n "$token" ]; then
+      #       echo "PROXYHAWK_API_TOKEN=$token" >> "$GITHUB_ENV"
+      #       exit 0
+      #     fi
+
+      #     echo "GitHub OIDC token unavailable — trying legacy ProxyHAWK secrets (manual/local only)."
+      #     login_error=""
+      #     if [ -n "${{ secrets.PROXYHAWK_API_EMAIL || vars.PROXYHAWK_API_EMAIL }}" ] && [ -n "${{ secrets.PROXYHAWK_API_PASSWORD || vars.PROXYHAWK_API_PASSWORD }}" ]; then
+      #       body=$(curl -sS \
+      #         -H "Content-Type: application/json" \
+      #         -H "ngrok-skip-browser-warning: true" \
+      #         -d "{\"email\":\"${{ secrets.PROXYHAWK_API_EMAIL || vars.PROXYHAWK_API_EMAIL }}\",\"password\":\"${{ secrets.PROXYHAWK_API_PASSWORD || vars.PROXYHAWK_API_PASSWORD }}\"}" \
+      #         "${PROXYHAWK_API_BASE_URL%/}/api/v1/auth/login")
+      #       token=$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('accessToken',''))" 2>/dev/null || true)
+      #       login_error="$body"
+      #     fi
+      #     if [ -z "$token" ] && [ -n "${{ secrets.PROXYHAWK_API_TOKEN || vars.PROXYHAWK_API_TOKEN }}" ]; then
+      #       token="${{ secrets.PROXYHAWK_API_TOKEN || vars.PROXYHAWK_API_TOKEN }}"
+      #     fi
+      #     if [ -z "$token" ]; then
+      #       echo "Could not authenticate to ProxyHawk."
+      #       echo "For team CI: admin saves deploy checkpoint in ProxyHawk — no user secrets needed (GitHub OIDC)."
+      #       echo "For local/manual runs: set PROXYHAWK_API_TOKEN or email/password secrets."
+      #       [ -n "$login_error" ] && echo "Login failed: $login_error"
+      #       exit 1
+      #     fi
+      #     echo "::add-mask::$token"
+      #     echo "PROXYHAWK_API_TOKEN=$token" >> "$GITHUB_ENV"
+      - name: Login to ProxyHawk
+        env:
+          PROXYHAWK_API_BASE_URL: ${{ vars.PROXYHAWK_API_BASE_URL || secrets.PROXYHAWK_API_BASE_URL || 'https://api.proxyhawk.io' }}
         run: |
-          token="${{ steps.auth.outputs.token }}"
-          if [ -n "$token" ]; then
-            echo "PROXYHAWK_API_TOKEN=$token" >> "$GITHUB_ENV"
-            exit 0
-          fi
-
-          echo "GitHub OIDC token unavailable — trying legacy ProxyHAWK secrets (manual/local only)."
-          login_error=""
-          if [ -n "${{ secrets.PROXYHAWK_API_EMAIL || vars.PROXYHAWK_API_EMAIL }}" ] && [ -n "${{ secrets.PROXYHAWK_API_PASSWORD || vars.PROXYHAWK_API_PASSWORD }}" ]; then
-            body=$(curl -sS \
-              -H "Content-Type: application/json" \
-              -H "ngrok-skip-browser-warning: true" \
-              -d "{\"email\":\"${{ secrets.PROXYHAWK_API_EMAIL || vars.PROXYHAWK_API_EMAIL }}\",\"password\":\"${{ secrets.PROXYHAWK_API_PASSWORD || vars.PROXYHAWK_API_PASSWORD }}\"}" \
-              "${PROXYHAWK_API_BASE_URL%/}/api/v1/auth/login")
-            token=$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('accessToken',''))" 2>/dev/null || true)
-            login_error="$body"
-          fi
-          if [ -z "$token" ] && [ -n "${{ secrets.PROXYHAWK_API_TOKEN || vars.PROXYHAWK_API_TOKEN }}" ]; then
-            token="${{ secrets.PROXYHAWK_API_TOKEN || vars.PROXYHAWK_API_TOKEN }}"
-          fi
+          body=$(curl -sS \
+            -H "Content-Type: application/json" \
+            -d "{\"email\":\"${{ secrets.PROXYHAWK_API_EMAIL }}\",\"password\":\"${{ secrets.PROXYHAWK_API_PASSWORD }}\"}" \
+            "${PROXYHAWK_API_BASE_URL%/}/api/v1/auth/login")
+          token=$(echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin).get('accessToken',''))" 2>/dev/null || true)
           if [ -z "$token" ]; then
-            echo "Could not authenticate to ProxyHawk."
-            echo "For team CI: admin saves deploy checkpoint in ProxyHawk — no user secrets needed (GitHub OIDC)."
-            echo "For local/manual runs: set PROXYHAWK_API_TOKEN or email/password secrets."
-            [ -n "$login_error" ] && echo "Login failed: $login_error"
+            echo "Login failed: $body"
             exit 1
           fi
           echo "::add-mask::$token"
