@@ -55,7 +55,11 @@ pub async fn run_bundle(bundle: &HeadlessBundle, base_url: Option<&str>, timeout
             }
         };
         let entry = replay_endpoint(&client, ep, &url_str, bearer.as_deref()).await;
-        if entry.status == "ok" {
+        if is_login_endpoint(ep) {
+            if let Some(token) = extract_session_token(ep, entry.raw_body.as_deref()) {
+                bearer = Some(token);
+            }
+        } else if entry.status == "ok" {
             if let Some(token) = extract_session_token(ep, entry.raw_body.as_deref()) {
                 bearer = Some(token);
             }
@@ -371,12 +375,24 @@ async fn replay_endpoint(
 
 fn extract_session_token(ep: &HeadlessEndpoint, body: Option<&str>) -> Option<String> {
     let body = body?;
-    let path = ep
-        .auth_token_path
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("result.sessionToken");
-    extract_token(body.as_bytes(), path)
+    let mut paths: Vec<&str> = Vec::new();
+    if let Some(path) = ep.auth_token_path.as_deref().filter(|s| !s.is_empty()) {
+        paths.push(path);
+    }
+    paths.extend([
+        "access_tokened",
+        "accessToken",
+        "access_token",
+        "result.sessionToken",
+        "sessionToken",
+        "token",
+    ]);
+    for path in paths {
+        if let Some(token) = extract_token(body.as_bytes(), path) {
+            return Some(token);
+        }
+    }
+    None
 }
 
 fn build_headers(ep: &HeadlessEndpoint, bearer: Option<&str>) -> Result<HeaderMap, String> {

@@ -1,4 +1,5 @@
 use crate::bundle::{ImpactCriticality, ReleaseGatePolicy, RunEntry, RunSummary, SchemaIssue};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,6 +10,7 @@ pub struct ViolationGroup {
     pub release_gate: ReleaseGatePolicy,
     pub missing_items: Option<usize>,
     pub total_items: Option<usize>,
+    pub affected_indexes: Vec<usize>,
     pub child_field_count: usize,
 }
 
@@ -34,6 +36,7 @@ pub fn build_violation_groups(summary: &RunSummary) -> Vec<ViolationGroup> {
                 release_gate,
                 missing_items: None,
                 total_items: None,
+                affected_indexes: Vec::new(),
                 child_field_count: 0,
             });
 
@@ -55,6 +58,7 @@ pub fn build_violation_groups(summary: &RunSummary) -> Vec<ViolationGroup> {
                 if replace {
                     group.missing_items = Some(missing);
                     group.total_items = Some(total);
+                    group.affected_indexes = parse_array_indexes(&issue.message);
                 }
             }
         }
@@ -98,16 +102,159 @@ pub fn violation_group_key(path: &str) -> String {
 }
 
 pub fn parse_array_missing(message: &str) -> Option<(usize, usize)> {
-    let marker = " of ";
-    let start = message.find('(')?;
-    let inner = message.get(start + 1..)?.trim_end_matches(')');
-    let of_idx = inner.find(marker)?;
-    let missing_str = inner[..of_idx].trim();
-    let rest = inner[of_idx + marker.len()..].trim();
-    let total_str = rest.split_whitespace().next()?;
+    let needle = " array elements";
+    let idx = message.find(needle)?;
+    let before = message[..idx].trim();
+    let of_idx = before.rfind(" of ")?;
+    let missing_str = before[..of_idx]
+        .split_whitespace()
+        .next_back()?
+        .trim_start_matches('(');
+    let total_str = before[of_idx + 4..].trim();
     let missing: usize = missing_str.parse().ok()?;
     let total: usize = total_str.parse().ok()?;
     Some((missing, total))
+}
+
+pub fn parse_array_indexes(message: &str) -> Vec<usize> {
+    let mut indices = Vec::new();
+    for token in message.split_whitespace() {
+        let Some(raw) = token.strip_prefix('#') else {
+            continue;
+        };
+        let digits: String = raw.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            continue;
+        }
+        if let Ok(index) = digits.parse::<usize>() {
+            indices.push(index);
+        }
+    }
+    indices
+}
+
+pub fn format_index_list_compact(indices: &[usize]) -> String {
+    if indices.is_empty() {
+        return String::new();
+    }
+    let label = if indices.len() == 1 {
+        "index"
+    } else {
+        "indexes"
+    };
+    let first_few = indices
+        .iter()
+        .take(6)
+        .map(|idx| format!("#{idx}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let remaining = indices.len().saturating_sub(6);
+    if remaining > 0 {
+        format!("{label} {first_few}, +{remaining} more")
+    } else {
+        format!("{label} {first_few}")
+    }
+}
+
+pub fn annotate_response_preview(preview: &str, violations: &[SchemaIssue]) -> String {
+    let highlights = collect_array_highlights(violations);
+    if highlights.is_empty() {
+        return preview.to_string();
+    }
+    let Ok(value) = serde_json::from_str::<Value>(preview.trim()) else {
+        return preview.to_string();
+    };
+    let mut out = String::new();
+    format_value_with_highlights(&value, &highlights, "", 0, &mut out);
+    out
+}
+
+fn collect_array_highlights(violations: &[SchemaIssue]) -> BTreeMap<String, BTreeSet<usize>> {
+    let mut highlights: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
+    for issue in violations {
+        let indices = parse_array_indexes(&issue.message);
+        if indices.is_empty() {
+            continue;
+        }
+        let array_key = array_container_key(&issue.path);
+        highlights
+            .entry(array_key)
+            .or_default()
+            .extend(indices);
+    }
+    highlights
+}
+
+fn array_container_key(path: &str) -> String {
+    for part in path.split('.') {
+        if part.ends_with("[]") {
+            let key = part.trim_end_matches("[]");
+            if key.is_empty() || key == "items" {
+                return String::new();
+            }
+            return key.to_string();
+        }
+    }
+    String::new()
+}
+
+fn format_value_with_highlights(
+    value: &Value,
+    highlights: &BTreeMap<String, BTreeSet<usize>>,
+    array_key: &str,
+    indent: usize,
+    out: &mut String,
+) {
+    let pad = "  ".repeat(indent);
+    match value {
+        Value::Array(items) => {
+            let marker_set = highlights.get(array_key);
+            out.push_str(&format!("{pad}[\n"));
+            for (index, item) in items.iter().enumerate() {
+                if marker_set.is_some_and(|set| set.contains(&index)) {
+                    out.push_str(&format!(
+                        "{pad}  >>> array index #{index} — schema violation <<<\n"
+                    ));
+                }
+                format_value_with_highlights(item, highlights, "__nested__", indent + 1, out);
+                if index + 1 < items.len() {
+                    out.push_str(",\n");
+                } else {
+                    out.push('\n');
+                }
+            }
+            out.push_str(&format!("{pad}]"));
+        }
+        Value::Object(map) => {
+            out.push_str(&format!("{pad}{{\n"));
+            let keys: Vec<_> = map.keys().collect();
+            for (i, key) in keys.iter().enumerate() {
+                out.push_str(&format!("{pad}  \"{key}\": "));
+                let child_array_key = if map.get(key.as_str()).is_some_and(Value::is_array) {
+                    key.as_str()
+                } else {
+                    array_key
+                };
+                format_value_with_highlights(
+                    &map[*key],
+                    highlights,
+                    child_array_key,
+                    indent + 1,
+                    out,
+                );
+                if i + 1 < keys.len() {
+                    out.push_str(",\n");
+                } else {
+                    out.push('\n');
+                }
+            }
+            out.push_str(&format!("{pad}}}"));
+        }
+        Value::String(text) => {
+            out.push_str(&serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string()));
+        }
+        _ => out.push_str(&value.to_string()),
+    }
 }
 
 pub fn print_deployment_summary(summary: &RunSummary) {
@@ -163,7 +310,11 @@ pub fn print_deployment_summary(summary: &RunSummary) {
 fn format_group_line(group: &ViolationGroup) -> String {
     let mut suffix = String::new();
     if let (Some(missing), Some(total)) = (group.missing_items, group.total_items) {
-        suffix.push_str(&format!(" ({missing}/{total} items missing"));
+        suffix.push_str(&format!(" ({missing}/{total} missing"));
+        if !group.affected_indexes.is_empty() {
+            suffix.push_str(" at ");
+            suffix.push_str(&format_index_list_compact(&group.affected_indexes));
+        }
         if group.child_field_count > 0 {
             suffix.push_str(&format!(", +{} child fields", group.child_field_count));
         }
@@ -284,7 +435,7 @@ mod tests {
             "warning",
             vec![issue(
                 "results[].userAssignedTo.username",
-                "Field removed: results[].userAssignedTo.username (2 of 20 array elements are missing this field: items #3, #14)",
+                "Field removed: results[].userAssignedTo.username (2 of 20 array elements missing this field at indexes #3, #14)",
             )],
         )]);
         let groups = build_violation_groups(&summary);
@@ -298,7 +449,7 @@ mod tests {
         let violations = [
             issue(
                 "results[].objectProject.createdAt",
-                "Field removed: results[].objectProject.createdAt (19 of 20 array elements are missing this field: items #0, #1)",
+                "Field removed: results[].objectProject.createdAt (19 of 20 array elements missing this field at indexes #0, #1)",
             ),
             issue(
                 "results[].objectProject.updatedAt",
@@ -306,7 +457,7 @@ mod tests {
             ),
             issue(
                 "results[].requiresSignature",
-                "Field removed: results[].requiresSignature (17 of 20 array elements are missing this field: items #0, #1)",
+                "Field removed: results[].requiresSignature (17 of 20 array elements missing this field at indexes #0, #1)",
             ),
         ];
         let summary = summary_with(vec![entry("ep1", "high", "blocker", violations.to_vec())]);
@@ -317,12 +468,43 @@ mod tests {
     }
 
     #[test]
-    fn parses_array_missing_counts() {
+    fn parses_array_indexes() {
         assert_eq!(
-            parse_array_missing(
-                "Field removed: results[].objectProject.createdAt (19 of 20 array elements are missing this field: items #0, #1)"
+            parse_array_indexes(
+                "Field removed: items[].title (1 of 4 array elements missing this field at index #2)"
             ),
-            Some((19, 20))
+            vec![2]
         );
+        assert_eq!(
+            parse_array_indexes(
+                "Field removed: results[].x (2 of 20 array elements missing this field at indexes #3, #14)"
+            ),
+            vec![3, 14]
+        );
+    }
+
+    #[test]
+    fn highlights_affected_array_items_in_preview() {
+        let preview = r#"[
+  {
+    "id": "1",
+    "title": "A"
+  },
+  {
+    "id": "2",
+    "title": "B"
+  },
+  {
+    "id": "3"
+  }
+]"#;
+        let annotated = annotate_response_preview(
+            preview,
+            &[issue(
+                "items[].title",
+                "Field removed: items[].title (1 of 3 array elements missing this field at index #2)",
+            )],
+        );
+        assert!(annotated.contains(">>> array index #2 — schema violation <<<"));
     }
 }

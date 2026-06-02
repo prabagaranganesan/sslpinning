@@ -522,11 +522,11 @@ fn inspect_parts(parts: &[String], baseline_type: &str, value: &Value) -> PathIn
         let missing_count = missing_indices.len();
 
         if object_elements.len() >= 2 && missing_count > 0 {
-            return PathInspection::Missing(Some(format!(
-                "{} of {} array elements are missing this field: {}",
+            return PathInspection::Missing(Some(array_element_issue_detail(
                 missing_count,
                 object_elements.len(),
-                array_index_summary(&missing_indices)
+                &missing_indices,
+                "missing this field",
             )));
         }
         if missing_count == inspections.len() {
@@ -548,7 +548,15 @@ fn inspect_parts(parts: &[String], baseline_type: &str, value: &Value) -> PathIn
             })
             .collect();
         if !null_indices.is_empty() && baseline_type != "null" {
-            return PathInspection::Present("null".to_string(), Some(array_index_summary(&null_indices)));
+            return PathInspection::Present(
+                "null".to_string(),
+                Some(array_element_issue_detail(
+                    null_indices.len(),
+                    object_elements.len(),
+                    &null_indices,
+                    "have null value",
+                )),
+            );
         }
         if present_types.iter().any(|t| t == baseline_type) {
             return PathInspection::Present(baseline_type.to_string(), None);
@@ -661,7 +669,19 @@ fn is_declared_by_schema(path: &str, baseline: &SchemaSnapshot) -> bool {
         .any(|k| k.starts_with(&dotted) || k.starts_with(&arrayed))
 }
 
-fn array_index_summary(indices: &[usize]) -> String {
+fn array_element_issue_detail(count: usize, total: usize, indices: &[usize], verb: &str) -> String {
+    format!(
+        "{count} of {total} array elements {verb} {}",
+        array_index_clause(indices)
+    )
+}
+
+fn array_index_clause(indices: &[usize]) -> String {
+    let label = if indices.len() == 1 {
+        "at index"
+    } else {
+        "at indexes"
+    };
     let first_few = indices
         .iter()
         .take(6)
@@ -670,12 +690,11 @@ fn array_index_summary(indices: &[usize]) -> String {
         .join(", ");
     let remaining = indices.len().saturating_sub(6);
     if remaining > 0 {
-        format!("items {first_few}, +{remaining} more")
+        format!("{label} {first_few}, +{remaining} more")
     } else {
-        format!("items {first_few}")
+        format!("{label} {first_few}")
     }
 }
-
 fn rename_hint_for_removed_path(
     path: &str,
     baseline_type: &str,

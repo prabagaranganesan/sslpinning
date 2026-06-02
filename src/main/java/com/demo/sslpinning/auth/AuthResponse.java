@@ -1,7 +1,9 @@
 package com.demo.sslpinning.auth;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 public record AuthResponse(
-        String accessToken,
+        @JsonProperty("access_tokened") String accessToken,
         String tokenType,
         long expiresIn,
         String username) {}

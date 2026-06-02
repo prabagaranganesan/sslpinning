@@ -7,7 +7,7 @@ mod submit;
 use anyhow::{Context, Result};
 use bundle::{PrintResponses, RunSummary};
 use clap::Parser;
-use report::print_deployment_summary;
+use report::{annotate_response_preview, print_deployment_summary};
 use runner::{load_bundle_from_api, load_bundle_from_file, run_bundle};
 use submit::{login, submit_run};
 use std::collections::BTreeSet;
@@ -173,8 +173,9 @@ fn print_human(summary: &RunSummary, print_responses: PrintResponses) {
         }
         if should_print_response(print_responses, &entry.status) {
             if let Some(preview) = &entry.response_preview {
+                let display = annotate_response_preview(preview, &entry.violations);
                 eprintln!("    response:");
-                for line in preview.lines() {
+                for line in display.lines() {
                     eprintln!("      {line}");
                 }
             }
