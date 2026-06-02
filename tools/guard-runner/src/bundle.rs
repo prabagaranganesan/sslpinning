@@ -306,6 +306,17 @@ pub fn is_login_endpoint(ep: &HeadlessEndpoint) -> bool {
     .any(|k| path.contains(k))
 }
 
+pub fn normalize_deploy_base_url(raw: &str) -> anyhow::Result<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("deploy base URL is empty");
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return Ok(trimmed.trim_end_matches('/').to_string());
+    }
+    Ok(format!("https://{}", trimmed.trim_start_matches('/')))
+}
+
 pub fn rewrite_url(original: &str, base_url: Option<&str>, ep: &HeadlessEndpoint) -> anyhow::Result<String> {
     let Some(base) = base_url else {
         return Ok(original.to_string());
@@ -313,8 +324,9 @@ pub fn rewrite_url(original: &str, base_url: Option<&str>, ep: &HeadlessEndpoint
     if is_login_endpoint(ep) {
         return Ok(original.to_string());
     }
+    let base_normalized = normalize_deploy_base_url(base)?;
     let orig = url::Url::parse(original)?;
-    let base_parsed = url::Url::parse(base)?;
+    let base_parsed = url::Url::parse(&base_normalized)?;
     // Mixed-host sessions (e.g. demo-api login + staging-gw APIs): only rewrite endpoints
     // captured on the deploy target host. Other hosts stay as recorded.
     if orig.host_str() != base_parsed.host_str() {
@@ -400,14 +412,14 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_updates_matching_host() {
-        let ep = sample_ep("GET", "https://staging.example.com/api/graphql");
+    fn rewrite_accepts_host_only_base_url() {
+        let ep = sample_ep("GET", "https://staging.example.com/api/items");
         let url = rewrite_url(
-            "https://staging.example.com/api/graphql",
-            Some("https://staging.example.com"),
+            "https://staging.example.com/api/items",
+            Some("staging.example.com"),
             &ep,
         )
         .unwrap();
-        assert_eq!(url, "https://staging.example.com/api/graphql");
+        assert_eq!(url, "https://staging.example.com/api/items");
     }
 }

@@ -67,8 +67,9 @@ async fn main() -> Result<()> {
         .base_url
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let summary = run_bundle(&bundle, base_url, args.timeout_secs).await?;
+        .filter(|s| !s.is_empty())
+        .and_then(|raw| bundle::normalize_deploy_base_url(raw).ok());
+    let summary = run_bundle(&bundle, base_url.as_deref(), args.timeout_secs).await?;
 
     if args.json {
         let json_summary = json_summary(&summary, args.print_responses);
