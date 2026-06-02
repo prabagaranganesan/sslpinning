@@ -3,7 +3,11 @@
 # Setup (one-time on Render):
 #   1. Service → Settings → turn OFF "Auto-Deploy" (GitHub Actions owns deploys).
 #   2. Service → Settings → Deploy Hook → copy URL.
-#   3. GitHub repo → Settings → Secrets → RENDER_DEPLOY_HOOK = that URL.
+#   3. GitHub repo → Settings → Secrets:
+#        RENDER_DEPLOY_HOOK = deploy hook URL
+#        RENDER_API_KEY       = Render API key (Account Settings → API Keys)
+#          Used to wait until the deploy is live before Guard runs.
+#          Without it, CI falls back to polling /api/health gitSha only.
 #
 # Optional repo variable: API_URL (default https://sslpinning-api.onrender.com)
 
@@ -52,6 +56,7 @@ jobs:
 
     steps:
       - name: Trigger Render deploy
+        id: trigger
         env:
           RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
           EXPECTED_SHA: ${{ github.sha }}
@@ -68,40 +73,84 @@ jobs:
             *) deploy_url="${hook}?ref=${EXPECTED_SHA}" ;;
           esac
           echo "Triggering Render deploy for commit ${EXPECTED_SHA} ..."
-          curl -sf -X POST "${deploy_url}"
-          echo "Deploy hook accepted."
+          response="$(curl -sf -X POST "${deploy_url}")"
+          echo "${response}"
+          deploy_id="$(printf '%s' "${response}" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("deploy",{}).get("id",""))')"
+          service_id="$(printf '%s' "${hook}" | python3 -c 'import sys,re; m=re.search(r"/deploy/(srv-[^/?]+)", sys.stdin.read()); print(m.group(1) if m else "")')"
+          if [ -z "${deploy_id}" ]; then
+            echo "::warning::Deploy hook response did not include deploy.id — will infer completion from /api/health gitSha."
+          fi
+          echo "deploy_id=${deploy_id}" >> "${GITHUB_OUTPUT}"
+          echo "service_id=${service_id}" >> "${GITHUB_OUTPUT}"
 
-      - name: Wait for deployed commit
+      - name: Wait for Render deploy to complete
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          SERVICE_ID: ${{ steps.trigger.outputs.service_id }}
+          DEPLOY_ID: ${{ steps.trigger.outputs.deploy_id }}
+        run: |
+          if [ -z "${RENDER_API_KEY}" ]; then
+            echo "RENDER_API_KEY not set — skipping Render deploy-status polling."
+            echo "Will wait for live traffic to report the new commit on /api/health instead."
+            exit 0
+          fi
+          if [ -z "${SERVICE_ID}" ] || [ -z "${DEPLOY_ID}" ]; then
+            echo "Missing Render service/deploy id — skipping deploy-status polling."
+            exit 0
+          fi
+          echo "Waiting for Render deploy ${DEPLOY_ID} on ${SERVICE_ID} to finish ..."
+          for attempt in $(seq 1 60); do
+            body="$(curl -sf \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" \
+              -H "Accept: application/json" \
+              "https://api.render.com/v1/services/${SERVICE_ID}/deploys/${DEPLOY_ID}" 2>/dev/null || true)"
+            if [ -z "${body}" ]; then
+              echo "Attempt ${attempt}/60 — deploy status unavailable, retrying in 15s ..."
+              sleep 15
+              continue
+            fi
+            status="$(printf '%s' "${body}" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("status") or d.get("deploy",{}).get("status",""))')"
+            echo "Attempt ${attempt}/60 — Render deploy status: ${status}"
+            case "${status}" in
+              live)
+                echo "Render deploy is live."
+                exit 0
+                ;;
+              build_failed|canceled|deactivated)
+                echo "::error::Render deploy failed with status: ${status}"
+                exit 1
+                ;;
+            esac
+            sleep 15
+          done
+          echo "::error::Render deploy did not reach live within ~15 minutes"
+          exit 1
+
+      - name: Verify live commit on API
         env:
           API_URL: ${{ vars.API_URL || 'https://sslpinning-api.onrender.com' }}
           EXPECTED_SHA: ${{ github.sha }}
         run: |
-          echo "Render Docker builds often take 3–8 minutes — waiting before polling ..."
-          sleep 180
-          echo "Waiting for ${API_URL}/api/health to report commit ${EXPECTED_SHA} ..."
-          for attempt in $(seq 1 48); do
+          echo "Verifying ${API_URL}/api/health reports commit ${EXPECTED_SHA} ..."
+          for attempt in $(seq 1 24); do
             body="$(curl -sf "${API_URL}/api/health" 2>/dev/null || true)"
             if [ -n "${body}" ]; then
               actual="$(printf '%s' "${body}" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("gitSha",""))')"
-              echo "Attempt ${attempt}/48 — health=${body}"
+              echo "Attempt ${attempt}/24 — health=${body}"
               if [ "${actual}" = "${EXPECTED_SHA}" ]; then
-                echo "Deploy live at expected commit."
+                echo "Live API is serving the expected commit."
                 exit 0
               fi
-              # Render may expose a short SHA prefix in some setups.
               if [ -n "${actual}" ] && [ "${#actual}" -ge 7 ] && [ "${EXPECTED_SHA#${actual}}" != "${EXPECTED_SHA}" ]; then
-                echo "Deploy live at expected commit (short SHA prefix)."
+                echo "Live API is serving the expected commit (short SHA prefix)."
                 exit 0
-              fi
-              if [ -z "${actual}" ] || [ "${actual}" = "unknown" ]; then
-                echo "  (previous deploy still serving — new build not live yet)"
               fi
             else
-              echo "Attempt ${attempt}/48 — health check unreachable"
+              echo "Attempt ${attempt}/24 — health check unreachable"
             fi
-            sleep 15
+            sleep 10
           done
-          echo "::error::Deploy did not reach commit ${EXPECTED_SHA} within ~15 minutes"
+          echo "::error::Live API did not report commit ${EXPECTED_SHA} within ~4 minutes after deploy completed"
           exit 1
 
   guard-checkpoint:
