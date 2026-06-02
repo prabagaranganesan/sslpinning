@@ -5,7 +5,7 @@ services:
     runtime: docker
     plan: free
     region: oregon
-    rootDir: backend
+    # Code is at repo root on the demo branch. Leave Root Directory blank in the Render dashboard.
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /api/health

@@ -16,7 +16,43 @@ struct ContentView: View {
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
-                    //Toggle("SSL certificate pinning", isOn: $model.pinningEnabled)
+
+                    if model.isLoggedIn {
+                        LabeledContent("Signed in", value: model.loggedInUsername ?? "")
+                        Button(role: .destructive) {
+                            model.logout()
+                        } label: {
+                            Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
+                        }
+                    } else {
+                        TextField("Username", text: $model.username)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        SecureField("Password", text: $model.password)
+                        Button {
+                            Task { await model.login() }
+                        } label: {
+                            if model.isAuthenticating {
+                                Label("Signing in…", systemImage: "person.crop.circle.badge.checkmark")
+                            } else {
+                                Label("Sign in", systemImage: "person.crop.circle")
+                            }
+                        }
+                        .disabled(model.isAuthenticating)
+                    }
+                } header: {
+                    Text("Authentication")
+                } footer: {
+                    Text("POST /api/auth/login returns a JWT access token. Protected routes (e.g. GET /api/secrets) require `Authorization: Bearer <token>`. Demo user: demo / demo123.")
+                }
+
+                Section {
+                    Toggle("SSL certificate pinning", isOn: $model.pinningEnabled)
+                    TextField("Leaf SHA-256 (hex, manual)", text: $model.userPinnedLeafHex, axis: .vertical)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .font(.body.monospaced())
+                        .lineLimit(3 ... 6)
                     Button {
                         Task { await model.load() }
                     } label: {
@@ -26,12 +62,12 @@ struct ContentView: View {
                             Label("Load secrets", systemImage: "arrow.down.circle")
                         }
                     }
-                    .disabled(model.isLoading)
+                    .disabled(model.isLoading || !model.isLoggedIn)
                 } header: {
                     Text("Demo controls")
                 } footer: {
                     Text(
-                        "Proxy tools (e.g. ProxyHawk): use your Mac’s LAN IP in the URL, not 127.0.0.1—loopback bypasses the HTTP proxy. Point Simulator Settings → Wi‑Fi → HTTP Proxy at ProxyHawk, then use http://192.168.x.x:8080.\n\nWithout pinning, the app trusts the system roots. With pinning over HTTPS, the leaf certificate must match the hash in code."
+                        "Get the pin yourself (Terminal): openssl s_client -connect YOUR_HOST:443 -servername YOUR_HOST </dev/null 2>/dev/null | openssl x509 -outform der | openssl dgst -sha256 — paste the hex here or into PinningConfig.pinnedLeafCertificateSHA256Hex in Xcode.\n\nProxy tools: use LAN IP or a public https URL, not 127.0.0.1, if you need traffic through a proxy."
                     )
                 }
 
@@ -45,7 +81,9 @@ struct ContentView: View {
 
                 Section("Secret items (from API)") {
                     if model.items.isEmpty, !model.isLoading {
-                        Text("No items yet. Start the Spring Boot app and tap Load secrets.")
+                        Text(model.isLoggedIn
+                            ? "No items yet. Tap Load secrets."
+                            : "Sign in, then tap Load secrets.")
                             .foregroundStyle(.secondary)
                     }
                     ForEach(model.items) { item in
@@ -65,7 +103,9 @@ struct ContentView: View {
             .navigationTitle("SSL Pinning Demo")
         }
         .task {
-            await model.load()
+            if model.isLoggedIn {
+                await model.load()
+            }
         }
     }
 }

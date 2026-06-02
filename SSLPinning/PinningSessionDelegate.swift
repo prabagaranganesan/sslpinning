@@ -7,13 +7,12 @@ import CryptoKit
 import Foundation
 import Security
 
-final class PinningSessionDelegate: NSObject, URLSessionDelegate {
-    var pinningEnabled = true
+final class PinningSessionDelegate: NSObject, URLSessionDelegate, URLSessionTaskDelegate {
+    var pinningEnabled = false
     var pinnedLeafCertificateSHA256Hex: [String] = []
 
-    func urlSession(
-        _ session: URLSession,
-        didReceive challenge: URLAuthenticationChallenge,
+    private func handleChallenge(
+        _ challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
         guard pinningEnabled,
@@ -30,8 +29,9 @@ final class PinningSessionDelegate: NSObject, URLSessionDelegate {
             return
         }
 
-        if pinnedLeafCertificateSHA256Hex.isEmpty {
-            completionHandler(.performDefaultHandling, nil)
+        if pinnedLeafCertificateSHA256Hex.isEmpty == true {
+            // Strict mode: if user turned pinning on for HTTPS, require at least one pin.
+            completionHandler(.cancelAuthenticationChallenge, nil)
             return
         }
 
@@ -51,5 +51,22 @@ final class PinningSessionDelegate: NSObject, URLSessionDelegate {
         } else {
             completionHandler(.cancelAuthenticationChallenge, nil)
         }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        handleChallenge(challenge, completionHandler: completionHandler)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        handleChallenge(challenge, completionHandler: completionHandler)
     }
 }
