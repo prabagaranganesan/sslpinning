@@ -54,6 +54,7 @@ jobs:
       - name: Trigger Render deploy
         env:
           RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+          EXPECTED_SHA: ${{ github.sha }}
         run: |
           if [ -z "${RENDER_DEPLOY_HOOK}" ]; then
             echo "::error::Missing RENDER_DEPLOY_HOOK secret."
@@ -61,8 +62,13 @@ jobs:
             echo "Also disable Auto-Deploy on Render so only this workflow triggers deploys."
             exit 1
           fi
-          echo "Triggering Render deploy..."
-          curl -sf -X POST "${RENDER_DEPLOY_HOOK}"
+          hook="${RENDER_DEPLOY_HOOK}"
+          case "${hook}" in
+            *\?*) deploy_url="${hook}&ref=${EXPECTED_SHA}" ;;
+            *) deploy_url="${hook}?ref=${EXPECTED_SHA}" ;;
+          esac
+          echo "Triggering Render deploy for commit ${EXPECTED_SHA} ..."
+          curl -sf -X POST "${deploy_url}"
           echo "Deploy hook accepted."
 
       - name: Wait for deployed commit
@@ -70,22 +76,32 @@ jobs:
           API_URL: ${{ vars.API_URL || 'https://sslpinning-api.onrender.com' }}
           EXPECTED_SHA: ${{ github.sha }}
         run: |
+          echo "Render Docker builds often take 3–8 minutes — waiting before polling ..."
+          sleep 180
           echo "Waiting for ${API_URL}/api/health to report commit ${EXPECTED_SHA} ..."
-          for attempt in $(seq 1 40); do
+          for attempt in $(seq 1 48); do
             body="$(curl -sf "${API_URL}/api/health" 2>/dev/null || true)"
             if [ -n "${body}" ]; then
               actual="$(printf '%s' "${body}" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("gitSha",""))')"
-              echo "Attempt ${attempt}/40 — live gitSha=${actual:-<missing>}"
+              echo "Attempt ${attempt}/48 — health=${body}"
               if [ "${actual}" = "${EXPECTED_SHA}" ]; then
                 echo "Deploy live at expected commit."
                 exit 0
               fi
+              # Render may expose a short SHA prefix in some setups.
+              if [ -n "${actual}" ] && [ "${#actual}" -ge 7 ] && [ "${EXPECTED_SHA#${actual}}" != "${EXPECTED_SHA}" ]; then
+                echo "Deploy live at expected commit (short SHA prefix)."
+                exit 0
+              fi
+              if [ -z "${actual}" ] || [ "${actual}" = "unknown" ]; then
+                echo "  (previous deploy still serving — new build not live yet)"
+              fi
             else
-              echo "Attempt ${attempt}/40 — health check unreachable, retrying in 15s ..."
+              echo "Attempt ${attempt}/48 — health check unreachable"
             fi
             sleep 15
           done
-          echo "::error::Deploy did not reach commit ${EXPECTED_SHA} within ~10 minutes"
+          echo "::error::Deploy did not reach commit ${EXPECTED_SHA} within ~15 minutes"
           exit 1
 
   guard-checkpoint:

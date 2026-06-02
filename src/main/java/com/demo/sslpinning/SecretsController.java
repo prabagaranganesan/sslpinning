@@ -21,7 +21,10 @@ public class SecretsController {
 
     @GetMapping("/health")
     public Health health() {
-        String gitSha = System.getenv("RENDER_GIT_COMMIT");
+        String gitSha = System.getenv("APP_GIT_SHA");
+        if (gitSha == null || gitSha.isBlank()) {
+            gitSha = System.getenv("RENDER_GIT_COMMIT");
+        }
         if (gitSha == null || gitSha.isBlank()) {
             gitSha = System.getenv("GIT_COMMIT");
         }
