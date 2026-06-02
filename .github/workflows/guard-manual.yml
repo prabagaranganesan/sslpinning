@@ -24,5 +24,4 @@ jobs:
       commit_sha: ${{ github.sha }}
       run_mode: headless
       fail_on_guard_issues: ${{ inputs.fail_on_guard_issues }}
-      guard_runner_repository: prabagaranganesan/ProxyBuddyApp
     secrets: inherit
