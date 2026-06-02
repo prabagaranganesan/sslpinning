@@ -9,7 +9,7 @@ services:
     runtime: docker
     plan: free
     region: oregon
-    rootDir: backend
+    # Code is at repo root (Dockerfile, pom.xml, src/). Do not set rootDir to backend.
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /api/health
