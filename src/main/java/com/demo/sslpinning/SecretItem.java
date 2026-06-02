@@ -1,3 +1,9 @@
 package com.demo.sslpinning;
 
-public record SecretItem(String id, String titleo, String value, String sensitivity) {}
+import com.fasterxml.jackson.annotation.JsonInclude;
+
+public record SecretItem(
+        String id,
+        @JsonInclude(JsonInclude.Include.NON_NULL) String title,
+        String value,
+        String sensitivity) {}
