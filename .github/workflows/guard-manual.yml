@@ -1,0 +1,30 @@
+name: Guard checkpoint (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Must match ProxyHawk deploy checkpoint (e.g. dev)"
+        required: true
+        default: "dev"
+      fail_on_guard_issues:
+        description: "Fail if Guard finds broken endpoints"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  guard-checkpoint:
+    name: ProxyHawk Guard
+    uses: prabagaranganesan/ProxyBuddyApp/.github/workflows/guard-deploy-pr-check.yml@main
+    with:
+      environment: ${{ inputs.environment }}
+      commit_sha: ${{ github.sha }}
+      run_mode: headless
+      fail_on_guard_issues: ${{ inputs.fail_on_guard_issues }}
+      guard_runner_repository: prabagaranganesan/ProxyBuddyApp
+    secrets: inherit
