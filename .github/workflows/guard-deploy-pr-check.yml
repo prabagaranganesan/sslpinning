@@ -255,7 +255,7 @@ jobs:
       - name: Notify backend deployment event
         if: steps.mapping.outputs.matched == 'true'
         env:
-          PROXYHAWK_API_BASE_URL: ${{ secrets.PROXYHAWK_API_BASE_URL || vars.PROXYHAWK_API_BASE_URL }}
+          PROXYHAWK_API_BASE_URL: ${{ vars.PROXYHAWK_API_BASE_URL || secrets.PROXYHAWK_API_BASE_URL || 'https://api.proxyhawk.io' }}
         run: |
           payload=$(cat <<EOF
           {
@@ -313,7 +313,7 @@ jobs:
       - name: Run Guard headless against deployed API
         if: steps.mapping.outputs.matched == 'true' && steps.ctx.outputs.run_mode == 'headless'
         env:
-          PROXYHAWK_API_BASE_URL: ${{ secrets.PROXYHAWK_API_BASE_URL || vars.PROXYHAWK_API_BASE_URL }}
+          PROXYHAWK_API_BASE_URL: ${{ vars.PROXYHAWK_API_BASE_URL || secrets.PROXYHAWK_API_BASE_URL || 'https://api.proxyhawk.io' }}
           PROXYHAWK_API_EMAIL: ${{ secrets.PROXYHAWK_API_EMAIL || vars.PROXYHAWK_API_EMAIL }}
           PROXYHAWK_API_PASSWORD: ${{ secrets.PROXYHAWK_API_PASSWORD || vars.PROXYHAWK_API_PASSWORD }}
           PROXYHAWK_GUARD_SESSION_ID: ${{ steps.mapping.outputs.guard_session_id }}
@@ -352,7 +352,7 @@ jobs:
         if: steps.mapping.outputs.matched == 'true' && steps.ctx.outputs.run_mode == 'mac_push'
         id: mac_push
         env:
-          PROXYHAWK_API_BASE_URL: ${{ secrets.PROXYHAWK_API_BASE_URL || vars.PROXYHAWK_API_BASE_URL }}
+          PROXYHAWK_API_BASE_URL: ${{ vars.PROXYHAWK_API_BASE_URL || secrets.PROXYHAWK_API_BASE_URL || 'https://api.proxyhawk.io' }}
           PROXYHAWK_MACHINE_ID: ${{ secrets.PROXYHAWK_MACHINE_ID || vars.PROXYHAWK_MACHINE_ID }}
         run: |
           if [ -z "$PROXYHAWK_MACHINE_ID" ]; then
@@ -409,7 +409,7 @@ jobs:
       - name: Wait for fresh Guard run after Mac push
         if: steps.mapping.outputs.matched == 'true' && steps.ctx.outputs.run_mode == 'mac_push'
         env:
-          PROXYHAWK_API_BASE_URL: ${{ secrets.PROXYHAWK_API_BASE_URL || vars.PROXYHAWK_API_BASE_URL }}
+          PROXYHAWK_API_BASE_URL: ${{ vars.PROXYHAWK_API_BASE_URL || secrets.PROXYHAWK_API_BASE_URL || 'https://api.proxyhawk.io' }}
         run: |
           sid="${{ steps.mapping.outputs.guard_session_id }}"
           url="${PROXYHAWK_API_BASE_URL%/}/api/v1/guard/sessions/${sid}/runs/latest"
@@ -452,7 +452,7 @@ jobs:
         if: steps.mapping.outputs.matched == 'true'
         id: latest
         env:
-          PROXYHAWK_API_BASE_URL: ${{ secrets.PROXYHAWK_API_BASE_URL || vars.PROXYHAWK_API_BASE_URL }}
+          PROXYHAWK_API_BASE_URL: ${{ vars.PROXYHAWK_API_BASE_URL || secrets.PROXYHAWK_API_BASE_URL || 'https://api.proxyhawk.io' }}
         run: |
           sid="${{ steps.mapping.outputs.guard_session_id }}"
           url="${PROXYHAWK_API_BASE_URL%/}/api/v1/guard/sessions/${sid}/runs/latest"
