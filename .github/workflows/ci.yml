@@ -1,0 +1,94 @@
+# Backend CI/CD: test → trigger Render deploy → ProxyHawk Guard checkpoint.
+#
+# Setup (one-time on Render):
+#   1. Service → Settings → turn OFF "Auto-Deploy" (GitHub Actions owns deploys).
+#   2. Service → Settings → Deploy Hook → copy URL.
+#   3. GitHub repo → Settings → Secrets → RENDER_DEPLOY_HOOK = that URL.
+#
+# Optional repo variable: API_URL (default https://sslpinning-api.onrender.com)
+
+name: Backend CI / CD
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+          cache: "maven"
+
+      - name: Run tests
+        run: mvn -B test
+
+  deploy:
+    name: Deploy → Render
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://sslpinning-api.onrender.com
+
+    steps:
+      - name: Trigger Render deploy
+        env:
+          RENDER_DEPLOY_HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -z "${RENDER_DEPLOY_HOOK}" ]; then
+            echo "::error::Missing RENDER_DEPLOY_HOOK secret."
+            echo "Render → your service → Settings → Deploy Hook → add URL as a GitHub secret."
+            echo "Also disable Auto-Deploy on Render so only this workflow triggers deploys."
+            exit 1
+          fi
+          echo "Triggering Render deploy..."
+          curl -sf -X POST "${RENDER_DEPLOY_HOOK}"
+          echo "Deploy hook accepted."
+
+      - name: Wait for API health
+        env:
+          API_URL: ${{ vars.API_URL || 'https://sslpinning-api.onrender.com' }}
+        run: |
+          echo "Waiting for ${API_URL}/api/health ..."
+          for attempt in $(seq 1 40); do
+            if curl -sf "${API_URL}/api/health" -o /dev/null; then
+              echo "API healthy after deploy (attempt ${attempt})"
+              exit 0
+            fi
+            echo "Attempt ${attempt}/40 — not ready, retrying in 15s ..."
+            sleep 15
+          done
+          echo "::error::API did not become healthy within ~10 minutes"
+          exit 1
+
+  guard-checkpoint:
+    name: ProxyHawk Guard checkpoint
+    needs: deploy
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/guard-deploy-pr-check.yml
+    with:
+      environment: dev
+      commit_sha: ${{ github.sha }}
+      run_mode: headless
+      fail_on_guard_issues: false
+    secrets: inherit
