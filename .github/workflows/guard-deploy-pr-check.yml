@@ -239,10 +239,12 @@ jobs:
               payload = json.load(f)
           matched = bool(payload.get("matched"))
           mapping = payload.get("mapping") or {}
+          guard_session_id = mapping.get("guardSessionId") or ""
+          target_base_url = mapping.get("targetBaseUrl") or ""
           with open(".mapping.out", "w", encoding="utf-8") as out:
               out.write(f"matched={'true' if matched else 'false'}\n")
-              out.write(f"guard_session_id={mapping.get('guardSessionId','')}\n")
-              out.write(f"target_base_url={mapping.get('targetBaseUrl','')}\n")
+              out.write(f"guard_session_id={guard_session_id}\n")
+              out.write(f"target_base_url={target_base_url}\n")
           PY
           cat .mapping.out >> "$GITHUB_OUTPUT"
 
