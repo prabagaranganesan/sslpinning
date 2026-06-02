@@ -65,20 +65,27 @@ jobs:
           curl -sf -X POST "${RENDER_DEPLOY_HOOK}"
           echo "Deploy hook accepted."
 
-      - name: Wait for API health
+      - name: Wait for deployed commit
         env:
           API_URL: ${{ vars.API_URL || 'https://sslpinning-api.onrender.com' }}
+          EXPECTED_SHA: ${{ github.sha }}
         run: |
-          echo "Waiting for ${API_URL}/api/health ..."
+          echo "Waiting for ${API_URL}/api/health to report commit ${EXPECTED_SHA} ..."
           for attempt in $(seq 1 40); do
-            if curl -sf "${API_URL}/api/health" -o /dev/null; then
-              echo "API healthy after deploy (attempt ${attempt})"
-              exit 0
+            body="$(curl -sf "${API_URL}/api/health" 2>/dev/null || true)"
+            if [ -n "${body}" ]; then
+              actual="$(printf '%s' "${body}" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("gitSha",""))')"
+              echo "Attempt ${attempt}/40 — live gitSha=${actual:-<missing>}"
+              if [ "${actual}" = "${EXPECTED_SHA}" ]; then
+                echo "Deploy live at expected commit."
+                exit 0
+              fi
+            else
+              echo "Attempt ${attempt}/40 — health check unreachable, retrying in 15s ..."
             fi
-            echo "Attempt ${attempt}/40 — not ready, retrying in 15s ..."
             sleep 15
           done
-          echo "::error::API did not become healthy within ~10 minutes"
+          echo "::error::Deploy did not reach commit ${EXPECTED_SHA} within ~10 minutes"
           exit 1
 
   guard-checkpoint:
