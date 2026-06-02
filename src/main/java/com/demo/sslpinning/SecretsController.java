@@ -13,10 +13,10 @@ public class SecretsController {
     @GetMapping("/secrets")
     public List<SecretItem> secrets() {
         return List.of(
-                new SecretItem("1", "sk_demo_7f3c9a2b1e8d4c6f", "high"),
-                new SecretItem("2", "svc.internal.rotating.example", "high"),
-                new SecretItem("3", "{\"premium\":true,\"region\":\"eu\"}", "medium"),
-                new SecretItem("4", "SUP-88421-RESET", "medium"));
+                new SecretItem("1", "API key (demo)", "sk_demo_7f3c9a2b1e8d4c6f", "high"),
+                new SecretItem("2", "Internal service token", "svc.internal.rotating.example", "high"),
+                new SecretItem("3", "Feature flag payload", "{\"premium\":true,\"region\":\"eu\"}", "medium"),
+                new SecretItem("4", "Support override code", "SUP-88421-RESET", "medium"));
     }
 
     @GetMapping("/health")
