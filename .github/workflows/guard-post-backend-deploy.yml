@@ -1,0 +1,32 @@
+name: Guard Post-Backend Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      commit_sha:
+        required: false
+        type: string
+    secrets:
+      PROXYHAWK_API_BASE_URL:
+        required: false
+      PROXYHAWK_API_EMAIL:
+        required: false
+      PROXYHAWK_API_PASSWORD:
+        required: false
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  guard-checkpoint:
+    uses: ./.github/workflows/guard-deploy-pr-check.yml
+    with:
+      environment: ${{ inputs.environment }}
+      commit_sha: ${{ inputs.commit_sha || github.sha }}
+      fail_on_guard_issues: false
+    secrets: inherit

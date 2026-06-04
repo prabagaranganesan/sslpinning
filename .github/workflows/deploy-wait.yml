@@ -1,0 +1,79 @@
+name: Deploy and verify
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: "render | railway | webhook | verify-only"
+        required: true
+        type: string
+      expected_sha:
+        description: Git commit SHA expected to be live
+        required: true
+        type: string
+      api_url:
+        description: Base URL of deployed API
+        required: true
+        type: string
+      health_path:
+        description: Health check path
+        required: false
+        type: string
+        default: "/api/health"
+      environment_label:
+        description: staging | production
+        required: false
+        type: string
+        default: ""
+      railway_service:
+        description: Railway service name
+        required: false
+        type: string
+        default: ""
+    secrets:
+      DEPLOY_HOOK:
+        required: false
+      DEPLOY_API_KEY:
+        required: false
+      RAILWAY_TOKEN:
+        required: false
+
+jobs:
+  deploy-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy to Railway
+        if: inputs.platform == 'railway'
+        uses: bervProject/railway-deploy@main
+        with:
+          railway_token: ${{ secrets.RAILWAY_TOKEN }}
+          service: ${{ inputs.railway_service }}
+      - name: Trigger deploy (render/webhook)
+        if: inputs.platform == 'render' || inputs.platform == 'webhook'
+        env:
+          DEPLOY_HOOK: ${{ secrets.DEPLOY_HOOK }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          if [ -z "$DEPLOY_HOOK" ]; then
+            echo "DEPLOY_HOOK is required for render/webhook"
+            exit 1
+          fi
+          curl -fsSL -X POST "${DEPLOY_HOOK}&ref=${EXPECTED_SHA}" ||           curl -fsSL -X POST -H "Content-Type: application/json"             -d "{"ref":"${EXPECTED_SHA}"}" "${DEPLOY_HOOK}"
+      - name: Wait for live SHA
+        env:
+          API_URL: ${{ inputs.api_url }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          HEALTH_PATH: ${{ inputs.health_path }}
+        run: |
+          for i in $(seq 1 90); do
+            body="$(curl -fsSL "${API_URL}${HEALTH_PATH}" || true)"
+            sha="$(echo "$body" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("gitSha",""))' 2>/dev/null || true)"
+            if [ "$sha" = "$EXPECTED_SHA" ]; then
+              echo "Live commit verified: $sha"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Timed out waiting for live gitSha=${EXPECTED_SHA}"
+          exit 1

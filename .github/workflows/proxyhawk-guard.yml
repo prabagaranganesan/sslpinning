@@ -1,0 +1,72 @@
+name: Backend CI / CD
+
+on:
+  push:
+    branches: ['main', 'develop']
+  pull_request:
+    branches: ['main', 'develop']
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+  - uses: actions/setup-java@v4
+    with:
+      java-version: '17'
+      distribution: 'temurin'
+      cache: 'maven'
+  - run: mvn -B test
+
+  deploy-staging:
+    needs: test
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    environment: staging
+    uses: ./.github/workflows/deploy-wait.yml
+    with:
+      platform: ${{ vars.STAGING_DEPLOY_PLATFORM || 'render' }}
+      expected_sha: ${{ github.sha }}
+      api_url: ${{ vars.STAGING_API_URL || 'https://sslpinning-api.onrender.com' }}
+      environment_label: staging
+    secrets:
+      DEPLOY_HOOK: ${{ secrets.STAGING_DEPLOY_HOOK }}
+      DEPLOY_API_KEY: ${{ secrets.STAGING_DEPLOY_API_KEY }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_STAGING }}
+
+  guard-checkpoint-staging:
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    uses: ./.github/workflows/guard-post-backend-deploy.yml
+    with:
+      environment: staging
+      commit_sha: ${{ github.sha }}
+    secrets: inherit
+
+  deploy-production:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    environment: production
+    uses: ./.github/workflows/deploy-wait.yml
+    with:
+      platform: ${{ vars.PRODUCTION_DEPLOY_PLATFORM || 'render' }}
+      expected_sha: ${{ github.sha }}
+      api_url: ${{ vars.PRODUCTION_API_URL || 'https://sslpinning-api.onrender.com' }}
+      environment_label: production
+    secrets:
+      DEPLOY_HOOK: ${{ secrets.PRODUCTION_DEPLOY_HOOK }}
+      DEPLOY_API_KEY: ${{ secrets.PRODUCTION_DEPLOY_API_KEY }}
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN_PRODUCTION }}
+
+  guard-checkpoint-production:
+    needs: deploy-production
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    uses: ./.github/workflows/guard-post-backend-deploy.yml
+    with:
+      environment: production
+      commit_sha: ${{ github.sha }}
+    secrets: inherit
